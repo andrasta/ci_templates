@@ -1,0 +1,99 @@
+name: Development
+
+on:
+  workflow_call:
+    inputs:
+      AWS_REGION:
+        required: true
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      K8S_CONFIG:
+        required: false
+
+jobs:
+  build-developer-image:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Git checkout
+      uses: actions/checkout@v2.4.0
+      with:
+        submodules: true
+        fetch-depth: 0 # 0 indicates all history
+    - run: git fetch --all || echo "==> Accept any result"
+
+    - name: Declare some variables
+      id: vars
+      shell: bash
+      run: |
+        echo "::set-output name=short_tag::$(git describe --abbrev=0 --tags | cut -c 2-)"
+        echo "::set-output name=long_tag::$(git describe --abbrev=8 --tags --always --long --dirty | cut -c 2- | sed 's/-g/-/')"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push BE image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ${{ github.event.repository.name }}
+        SHORT_TAG: ${{ steps.vars.outputs.short_tag }}
+        LONG_TAG: ${{ steps.vars.outputs.long_tag }}
+      run: |
+        DOCKER_BUILDKIT=1 docker build --build-arg SHORT_TAG=$SHORT_TAG --build-arg LONG_TAG=$LONG_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:$LONG_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$LONG_TAG
+
+  deploy-to-sandbox-env:
+    needs: build-developer-image
+    runs-on: ubuntu-latest
+    env:
+      K8S_CONFIG: ${{ secrets.K8S_CONFIG }}
+    steps:
+    - name: Git checkout
+      uses: actions/checkout@v2.4.0
+      with:
+        submodules: true
+        fetch-depth: 0 # 0 indicates all history
+    - run: git fetch --all || echo "==> Accept any result"
+
+    - name: Declare some variables
+      id: vars
+      shell: bash
+      run: |
+        echo "::set-output name=short_tag::$(git describe --abbrev=0 --tags | cut -c 2-)"
+        echo "::set-output name=long_tag::$(git describe --abbrev=8 --tags --always --long --dirty | cut -c 2- | sed 's/-g/-/')"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.AWS_REGION }}
+
+    - name: Deploy to sandbox
+      env:
+        LONG_TAG: ${{ steps.vars.outputs.long_tag }}
+      run: |
+        echo ${{ secrets.K8S_CONFIG }} | base64 --decode > kubeconfig.yaml
+        export KUBECONFIG=kubeconfig.yaml
+        sed -i "s/TAG_PLACEHOLDER/$LONG_TAG/g" ./k8s/sandbox-deployment.yaml
+        kubectl -n sandbox apply -f k8s/sandbox-deployment.yaml
+
+  testing-sandbox-env:
+    needs: deploy-to-sandbox-env
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: API tests
+        run: |
+          echo "Tests will be here"
