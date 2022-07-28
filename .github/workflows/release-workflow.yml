@@ -54,7 +54,7 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_TAG
 
   deploy-to-sandbox-env:
-    needs: build-developer-image
+    needs: build-production-image
     runs-on: ubuntu-latest
     env:
       K8S_CONFIG: ${{ secrets.K8S_CONFIG }}
